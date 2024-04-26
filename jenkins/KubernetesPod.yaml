@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    service: sportybet-in-app-message
+spec:
+  nodeSelector:
+    service: build
+  initContainers:
+    - name: ecr-login
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/build/ecr-login:alpine-3.18.2
+      command: [ "/bin/sh" ]
+      args: [ "-c", "for r in eu-central-1 ap-southeast-1; do aws ecr get-login-password --region ${r} | docker --config /docker login --username AWS --password-stdin 942878658013.dkr.ecr.${r}.amazonaws.com; done && chmod o+r /docker/config.json" ]
+      volumeMounts:
+        - mountPath: /docker/
+          name: dockerconfig
+  containers:
+    - name: jnlp
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/jenkins/inbound-agent:4.3-4
+      env:
+        - name: CONTAINER_ENV_VAR
+          value: jnlp
+    - name: maven
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/maven:3.9.6-temurin-21-with-ss-4.7
+      resources:
+        requests:
+          memory: "8Gi"
+          cpu: "4"
+        limits:
+          memory: "8Gi"
+          cpu: "4"
+      volumeMounts:
+        - name: settings-xml
+          mountPath: /root/.m2/settings.xml
+          subPath: settings.xml
+      command:
+        - sleep
+      args:
+        - 99d
+      env:
+        - name: CONTAINER_ENV_VAR
+          value: maven
+    - name: maven21
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/maven:3.9.6-temurin-21-with-ss-4.7
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "1"
+        limits:
+          memory: "4Gi"
+          cpu: "1"
+      volumeMounts:
+        - name: settings-xml
+          mountPath: /root/.m2/settings.xml
+          subPath: settings.xml
+      command:
+        - sleep
+      args:
+        - 99d
+      env:
+        - name: CONTAINER_ENV_VAR
+          value: maven
+    - name: buildkitd
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/moby/buildkit:v0.12.2-rootless
+      args:
+        - --oci-worker-no-process-sandbox
+      env:
+        - name: DOCKER_CONFIG
+          value: '/docker'
+      readinessProbe:
+        exec:
+          command:
+            - buildctl
+            - debug
+            - workers
+        initialDelaySeconds: 5
+        periodSeconds: 30
+      livenessProbe:
+        exec:
+          command:
+            - buildctl
+            - debug
+            - workers
+        initialDelaySeconds: 5
+        periodSeconds: 30
+      resources:
+        requests:
+          cpu: 10m
+          memory: 256Mi
+      securityContext:
+        # Needs Kubernetes >= 1.19
+        seccompProfile:
+          type: Unconfined
+        # To change UID/GID, you need to rebuild the image
+        runAsUser: 1000
+        runAsGroup: 1000
+      volumeMounts:
+        # Dockerfile has `VOLUME /home/user/.local/share/buildkit` by default too,
+        # but the default VOLUME does not work with rootless on Google's Container-Optimized OS
+        # as it is mounted with `nosuid,nodev`.
+        # https://github.com/moby/buildkit/issues/879#issuecomment-1240347038
+        - mountPath: /home/user/.local/share/buildkit
+          name: buildkitd
+        - mountPath: /docker/
+          name: dockerconfig
+    - name: mysql
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/mysql:5.7.22
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "0.5"
+        limits:
+          memory: "2Gi"
+          cpu: "0.5"
+      env:
+        - name: MYSQL_DATABASE
+          value: afbet_main
+        - name: MYSQL_USER
+          value: unit_test
+        - name: MYSQL_PASSWORD
+          value: unit_test
+        - name: MYSQL_ROOT_PASSWORD
+          value: password
+      ports:
+        - containerPort: 3306
+          name: mysql-port
+          protocol: TCP
+    - name: redis
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/redis:6.2.6
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "0.5"
+        limits:
+          memory: "2Gi"
+          cpu: "0.5"
+      ports:
+        - containerPort: 6379
+          name: redis-port
+          protocol: TCP
+    - name: redis-cluster
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/redis:6.2.6
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "0.5"
+        limits:
+          memory: "2Gi"
+          cpu: "0.5"
+      env:
+        - name: HOST_IP_ADDRESS
+          value: 127.0.0.1
+      ports:
+        - containerPort: 7001
+          name: redis-port
+          protocol: TCP
+      command: [ "/bin/sh", "-c" ]
+      args:
+        - |-
+          for PORT in `seq 7001 7006`
+          do
+            echo bind 0.0.0.0                             >> redis_$${PORT}.conf;
+            echo port $${PORT}                            >> redis_$${PORT}.conf;
+            echo cluster-enabled yes                      >> redis_$${PORT}.conf;
+            echo cluster-config-file nodes_$${PORT}.conf  >> redis_$${PORT}.conf;
+            echo cluster-node-timeout 5000                >> redis_$${PORT}.conf;
+            echo appendonly yes                           >> redis_$${PORT}.conf;
+            echo protected-mode no                        >> redis_$${PORT}.conf;
+            echo cluster-announce-ip $${HOST_IP_ADDRESS}  >> redis_$${PORT}.conf;
+            echo cluster-announce-port $${PORT}           >> redis_$${PORT}.conf;
+            echo cluster-announce-bus-port 1$${PORT}      >> redis_$${PORT}.conf;
+            nohup redis-server redis_$${PORT}.conf &1> r$${PORT}.log;
+          done
+          sleep 2;
+          echo yes | redis-cli --cluster create $$HOST_IP_ADDRESS:7001 $$HOST_IP_ADDRESS:7002 $$HOST_IP_ADDRESS:7003 $$HOST_IP_ADDRESS:7004 $$HOST_IP_ADDRESS:7005 $$HOST_IP_ADDRESS:7006 --cluster-replicas 1;
+          tail -f r*.log
+    - name: git
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/alpine/git:v2.32.0
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "0.1"
+        limits:
+          memory: "256Mi"
+          cpu: "0.1"
+      command: [ "sleep", "99d" ]
+    - name: yq
+      image: 942878658013.dkr.ecr.eu-central-1.amazonaws.com/third-party/mikefarah/yq:3.4.1
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "0.1"
+        limits:
+          memory: "256Mi"
+          cpu: "0.1"
+      command: [ "sleep", "99d" ]
+  volumes:
+    - name: settings-xml
+      configMap:
+        name: settings-xml
+    - name: buildkitd
+      emptyDir: { }
+    - name: dockerconfig
+      emptyDir: { }

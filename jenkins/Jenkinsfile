@@ -1,0 +1,11 @@
+// Source Code - https://github.com/opennetltd/jenkins-pipeline-sportybet
+sportybetCountriesPipelineV3 {
+    appName = "sportybet-in-app-message"
+    yamlFile = "jenkins/KubernetesPod.yaml"
+    mavenPackaging = "mvn install -Pone-jar -DskipTests=true -B --no-transfer-progress"
+    enableAnalysisStage = true
+    enableUnitTestStage = true
+    sonar = "ENABLED"
+    sonarPRAnalysis = "ENABLED"
+    projectType = "MULTI"
+}
